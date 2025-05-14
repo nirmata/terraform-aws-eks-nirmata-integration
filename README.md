@@ -66,7 +66,7 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/Anujramola1999/novartis-eks-nirmata-integration.git
+   git clone https://github.com/nirmata/novartis-eks-nirmata-integration.git
    cd novartis-eks-nirmata-integration
    ```
 
