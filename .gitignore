@@ -31,4 +31,8 @@ terraform.rc
 controller_files.txt
 
 # Backup files
-*.backup 
+*.backup
+
+# But include our specific platform backup files
+!nirmata-integrated-windows.tf.backup
+!nirmata-integrated-linux.tf.backup 
