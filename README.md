@@ -36,11 +36,97 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 - `variables.tf` - Core terraform variables
 - `modules/eks/` - EKS module files
 
+## Detailed Setup Instructions
+
+### Prerequisites
+
+1. **AWS Access**: 
+   - Ensure you have AWS credentials for the DevTest environment
+   - Configure AWS CLI with the DevTest SSO profile:
+     ```bash
+     aws configure --profile devtest-sso
+     ```
+   - Verify your configuration works:
+     ```bash
+     aws sts get-caller-identity --profile devtest-sso
+     ```
+
+2. **Required Tools**:
+   - Install [Terraform](https://developer.hashicorp.com/terraform/downloads) (v1.2.0 or later)
+   - Install [kubectl](https://kubernetes.io/docs/tasks/tools/)
+   - Install [AWS CLI](https://aws.amazon.com/cli/)
+
+3. **Nirmata Access**:
+   - Create a Nirmata account if you don't have one
+   - Generate an API token from the Nirmata console
+     - Go to Settings → API Tokens → Add Token
+     - Save this token for use in the terraform.tfvars file
+
+### Configuration Steps
+
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/Anujramola1999/novartis-eks-nirmata-integration.git
+   cd novartis-eks-nirmata-integration
+   ```
+
+2. **Create terraform.tfvars File**:
+   - Copy the example file:
+     ```bash
+     cp terraform.tfvars.example terraform.tfvars
+     ```
+   - Edit the file to add your Nirmata token and customize cluster name if needed:
+     ```
+     # Nirmata API token for staging environment
+     nirmata_token = "your-nirmata-api-token-here"
+     
+     # Nirmata cluster configuration
+     nirmata_cluster_name = "your-cluster-name"
+     nirmata_cluster_type = "default-addons-type"
+     ```
+
+### Execution Steps
+
+1. **Initialize Terraform**:
+   ```bash
+   terraform init
+   ```
+
+2. **Preview the Changes**:
+   ```bash
+   terraform plan
+   ```
+
+3. **Apply the Configuration**:
+   ```bash
+   terraform apply
+   ```
+   When prompted, type `yes` to confirm
+
+4. **Verify the Deployment**:
+   - Configure kubectl to access your new cluster:
+     ```bash
+     aws eks update-kubeconfig --region us-west-1 --name your-cluster-name --profile devtest-sso
+     ```
+   - Check that nodes are running:
+     ```bash
+     kubectl get nodes
+     ```
+   - Verify Nirmata controllers are running:
+     ```bash
+     kubectl get pods -n nirmata
+     ```
+   - Log into Nirmata console to confirm the cluster is registered
+
+### Troubleshooting
+
+If you encounter issues, see the [Troubleshooting](#troubleshooting) section below or refer to the detailed [Nirmata Integration Guide](./nirmata-documentation.md).
+
 ## Quick Start
 
 1. Configure your Nirmata token in `terraform.tfvars`:
    ```hcl
-   nirmata_token = "your-nirmata-api-token"
+   nirmata_token = "your-nirmata-api-token-here"
    ```
 
 2. Initialize and apply:
