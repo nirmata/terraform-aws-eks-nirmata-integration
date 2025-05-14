@@ -1,2 +1,6 @@
 # Replace with your actual Nirmata API token
-nirmata_token = "your-nirmata-api-token-here" 
+nirmata_token = "your-nirmata-api-token-here"
+
+# Nirmata cluster configuration
+nirmata_cluster_name = "your-cluster-name"
+nirmata_cluster_type = "default-addons-type" 
