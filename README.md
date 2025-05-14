@@ -32,82 +32,51 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 - `main.tf` - Main EKS cluster configuration
 - `nirmata-integrated.tf` - Cross-platform Nirmata integration
 - `nirmata-variables.tf` - Nirmata-specific variables
-- `nirmata-platform-readme.md` - Detailed documentation on platform-specific implementations
+- `nirmata-documentation.md` - Detailed documentation on the integration process
 - `variables.tf` - Core terraform variables
 - `modules/eks/` - EKS module files
 
-## Complete Process
-
-### Step 1: Create the EKS Cluster and Register with Nirmata
+## Quick Start
 
 1. Configure your Nirmata token in `terraform.tfvars`:
    ```hcl
    nirmata_token = "your-nirmata-api-token"
    ```
 
-2. Initialize Terraform:
+2. Initialize and apply:
    ```bash
    terraform init
-   ```
-
-3. Review the execution plan:
-   ```bash
-   terraform plan
-   ```
-
-4. Apply the configuration:
-   ```bash
    terraform apply
    ```
 
-   This single command will:
+   That's it! The single command will:
    - Create the complete EKS cluster
    - Register the cluster with Nirmata
    - Download controller YAML files from Nirmata
    - Apply the controller manifests to the cluster
 
-5. The output will include:
-   - EKS cluster details (name, endpoint)
-   - Controller YAML files location
-   - Number of manifests applied by type (namespace, service account, CRDs, deployments)
+## How It Works
 
-### How It Works
-
-The implementation follows a modular approach:
-
-1. **EKS Cluster Creation** - Creates the AWS EKS cluster using Terraform's AWS provider
-
-2. **Nirmata Registration** - Uses the Nirmata provider to register the cluster:
-   ```hcl
-   resource "nirmata_cluster_registered" "eks-registered" {
-     name         = var.nirmata_cluster_name
-     cluster_type = var.nirmata_cluster_type
-     endpoint     = local.cluster_endpoint
-     depends_on   = [module.eks.cluster_id]
-   }
-   ```
-
-3. **Controller Deployment** - Uses platform-detection for cross-platform compatibility:
-   ```hcl
-   locals {
-     is_windows = substr(pathexpand("~"), 0, 1) == "/" ? false : true
-   }
-   ```
-
-4. **Application Order** - Controllers are applied in the correct sequence:
-   - Namespace manifests (temp-01-*)
-   - Service account manifests (temp-02-*)
-   - CRD manifests (temp-03-*)
-   - Deployment manifests (temp-04-*)
-
-## Platform Compatibility
+### Cross-Platform Compatibility
 
 This implementation automatically detects your operating system and uses appropriate commands:
+
+```hcl
+locals {
+  is_windows = substr(pathexpand("~"), 0, 1) == "/" ? false : true
+}
+```
 
 - **Windows Systems**: Uses PowerShell commands with proper Windows path handling
 - **Linux/Unix Systems**: Uses standard shell commands with Unix paths
 
-For more details on platform-specific implementations, see `nirmata-platform-readme.md`.
+### Application Process
+
+Controllers are applied in the correct sequence with appropriate waits between steps:
+1. Namespace manifests (temp-01-*)
+2. Service account manifests (temp-02-*)
+3. CRD manifests (temp-03-*)
+4. Deployment manifests (temp-04-*)
 
 ## Troubleshooting
 
@@ -129,7 +98,25 @@ If you encounter platform-specific issues, you can use the backup files:
 - `nirmata-integrated-windows.tf.backup` - Windows-specific implementation
 - `nirmata-integrated-linux.tf.backup` - Linux-specific implementation
 
-See `nirmata-platform-readme.md` for instructions on using these backup files.
+See `nirmata-documentation.md` for detailed instructions on using these backup files.
+
+## Manual Controller Application
+
+If automatic controller deployment fails, you can manually apply them:
+
+```bash
+# Apply namespace manifests
+kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-01-*
+
+# Apply service account manifests
+kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-02-*
+
+# Apply CRD manifests
+kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-03-*
+
+# Apply deployment manifests
+kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-04-*
+```
 
 ## Cleanup
 
@@ -154,3 +141,7 @@ To verify the installation:
    ```
 
 3. Check in Nirmata web console that the cluster appears as registered
+
+## Detailed Documentation
+
+For more detailed information about the integration process and troubleshooting, please refer to the [Nirmata Integration Guide](./nirmata-documentation.md).
