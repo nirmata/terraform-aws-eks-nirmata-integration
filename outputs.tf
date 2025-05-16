@@ -25,5 +25,5 @@ output "node_group_id" {
 
 output "kubeconfig_command" {
   description = "Command to configure kubectl"
-  value       = "aws eks update-kubeconfig --region us-west-1 --name ${var.cluster_name} --profile devtest-sso"
+  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${var.cluster_name} --profile ${var.aws_profile}"
 } 

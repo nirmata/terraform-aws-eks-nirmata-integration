@@ -4,10 +4,16 @@ variable "nirmata_token" {
   sensitive   = true
 }
 
+variable "nirmata_url" {
+  description = "URL for the Nirmata environment"
+  type        = string
+  default     = "https://nirmata.io"
+}
+
 variable "nirmata_cluster_name" {
   description = "Name of the cluster in Nirmata"
   type        = string
-  default     = "novartis-eks-cluster"
+  default     = "eks-cluster"
 }
 
 variable "nirmata_cluster_type" {

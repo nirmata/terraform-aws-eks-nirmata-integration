@@ -1,13 +1,13 @@
-# Novartis EKS-Nirmata Integration
+# EKS-Nirmata Integration
 
 This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirmata, and automatically deploys Nirmata controllers in a single operation. The implementation is cross-platform compatible, working on both Windows and Linux/Unix environments.
 
 ## Requirements
 
 - Terraform >= 1.2.0
-- AWS CLI configured with DevTest SSO profile (`devtest-sso`)
+- AWS CLI configured with appropriate profile
 - kubectl installed
-- AWS region set to `us-west-1`
+- AWS region access to create EKS clusters
 - Nirmata account with API token
 
 ## Resources Created
@@ -20,35 +20,41 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 
 ## Infrastructure Details
 
-- VPC: vpc-01a1c8d10eb2bb2ac (DevTest VPC in us-west-1)
-- Subnets: subnet-04309b222eb8fd488, subnet-0dff3fad15acc9156
 - EKS Version: 1.32
 - Node Group: 1x t3a.medium instance
 - Networking: Public endpoint only (private endpoint disabled)
-- IAM: Using devtest-sso profile for authentication and authorization
+- IAM: Using your configured AWS profile for authentication and authorization
 
 ## Files Structure
 
 - `main.tf` - Main EKS cluster configuration
-- `nirmata-integrated.tf` - Cross-platform Nirmata integration
+- `nirmata-integrated.tf` - Cross-platform Nirmata integration with robust kubeconfig handling
 - `nirmata-variables.tf` - Nirmata-specific variables
 - `nirmata-documentation.md` - Detailed documentation on the integration process
 - `variables.tf` - Core terraform variables
 - `modules/eks/` - EKS module files
+
+## Enhanced Features
+
+- **Robust Kubeconfig Handling**: Automatic validation and recovery of kubeconfig files
+- **Cross-Platform Compatibility**: Automatic detection of OS with appropriate commands for Windows/Linux
+- **Reliable Controller Deployment**: Individual file application with proper sequencing
+- **No Hardcoded Paths**: Dynamic path handling using environment variables
+- **Comprehensive Error Handling**: Better error messages and recovery
 
 ## Detailed Setup Instructions
 
 ### Prerequisites
 
 1. **AWS Access**: 
-   - Ensure you have AWS credentials for the DevTest environment
-   - Configure AWS CLI with the DevTest SSO profile:
+   - Ensure you have AWS credentials with access to create EKS clusters
+   - Configure AWS CLI with your profile:
      ```bash
-     aws configure --profile devtest-sso
+     aws configure --profile your-aws-profile
      ```
    - Verify your configuration works:
      ```bash
-     aws sts get-caller-identity --profile devtest-sso
+     aws sts get-caller-identity --profile your-aws-profile
      ```
 
 2. **Required Tools**:
@@ -66,8 +72,8 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/nirmata/novartis-eks-nirmata-integration.git
-   cd novartis-eks-nirmata-integration
+   git clone https://github.com/nirmata/eks-nirmata-integration.git
+   cd eks-nirmata-integration
    ```
 
 2. **Create terraform.tfvars File**:
@@ -75,14 +81,16 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
      ```bash
      cp terraform.tfvars.example terraform.tfvars
      ```
-   - Edit the file to add your Nirmata token and customize cluster name if needed:
+   - Edit the file to add your Nirmata token and customize other variables:
      ```
-     # Nirmata API token for staging environment
+     # Required
      nirmata_token = "your-nirmata-api-token-here"
      
-     # Nirmata cluster configuration
-     nirmata_cluster_name = "your-cluster-name"
-     nirmata_cluster_type = "default-addons-type"
+     # Optional - customize as needed
+     nirmata_url = "https://nirmata.io"
+     nirmata_cluster_name = "eks-cluster"
+     aws_region = "us-west-1"
+     aws_profile = "your-aws-profile"
      ```
 
 ### Execution Steps
@@ -104,9 +112,9 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
    When prompted, type `yes` to confirm
 
 4. **Verify the Deployment**:
-   - Configure kubectl to access your new cluster:
+   - The kubeconfig should be automatically configured, but you can manually run:
      ```bash
-     aws eks update-kubeconfig --region us-west-1 --name your-cluster-name --profile devtest-sso
+     aws eks update-kubeconfig --region <your-region> --name <your-cluster-name> --profile <your-aws-profile>
      ```
    - Check that nodes are running:
      ```bash
@@ -124,9 +132,10 @@ If you encounter issues, see the [Troubleshooting](#troubleshooting) section bel
 
 ## Quick Start
 
-1. Configure your Nirmata token in `terraform.tfvars`:
+1. Configure your variables in `terraform.tfvars`:
    ```hcl
    nirmata_token = "your-nirmata-api-token-here"
+   aws_profile = "your-aws-profile"
    ```
 
 2. Initialize and apply:
@@ -156,9 +165,18 @@ locals {
 - **Windows Systems**: Uses PowerShell commands with proper Windows path handling
 - **Linux/Unix Systems**: Uses standard shell commands with Unix paths
 
-### Application Process
+### Kubeconfig Handling
 
-Controllers are applied in the correct sequence with appropriate waits between steps:
+The implementation now includes robust kubeconfig validation and recovery:
+
+1. Checks if the kubeconfig exists
+2. Validates whether it's a properly formatted YAML file
+3. Creates a backup and fresh config if issues are detected
+4. Only then updates with the new cluster credentials
+
+### Controller Application Process
+
+Controllers are applied in the correct sequence with appropriate waits between steps and with individual file handling:
 1. Namespace manifests (temp-01-*)
 2. Service account manifests (temp-02-*)
 3. CRD manifests (temp-03-*)
@@ -168,14 +186,20 @@ Controllers are applied in the correct sequence with appropriate waits between s
 
 ### Common Issues
 
-1. **AWS Authentication**: Ensure your AWS CLI is configured with the DevTest SSO profile
+1. **AWS Authentication**: Ensure your AWS CLI is configured with the correct profile
    ```bash
-   aws configure --profile devtest-sso
+   aws configure --profile your-aws-profile
    ```
 
 2. **Nirmata Registration Errors**: Verify your Nirmata token is correct and has proper permissions
 
 3. **Controller Application Failures**: Check controller_files.txt for logs of what was attempted
+
+4. **Kubeconfig Issues**: If you encounter problems with your kubeconfig, you can reset it:
+   ```bash
+   rm ~/.kube/config && touch ~/.kube/config
+   aws eks update-kubeconfig --region <your-region> --name <your-cluster-name> --profile <your-profile>
+   ```
 
 ### Platform-Specific Considerations
 
@@ -185,24 +209,6 @@ If you encounter platform-specific issues, you can use the backup files:
 - `nirmata-integrated-linux.tf.backup` - Linux-specific implementation
 
 See `nirmata-documentation.md` for detailed instructions on using these backup files.
-
-## Manual Controller Application
-
-If automatic controller deployment fails, you can manually apply them:
-
-```bash
-# Apply namespace manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-01-*
-
-# Apply service account manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-02-*
-
-# Apply CRD manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-03-*
-
-# Apply deployment manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-04-*
-```
 
 ## Cleanup
 

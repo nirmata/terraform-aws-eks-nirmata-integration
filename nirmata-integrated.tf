@@ -3,7 +3,7 @@ provider "nirmata" {
   # Nirmata API Key - set this in terraform.tfvars
   token = var.nirmata_token
   # Nirmata URL
-  url   = "https://staging.nirmata.co"
+  url   = var.nirmata_url
 }
 
 # Reference to the already created EKS cluster from module.eks
@@ -37,9 +37,35 @@ resource "null_resource" "apply_controllers_windows" {
     always_run = "${timestamp()}"
   }
 
-  # Configure kubectl
+  # Check for and fix kubeconfig if needed, then configure kubectl
   provisioner "local-exec" {
-    command = "aws eks update-kubeconfig --region us-west-1 --name ${local.cluster_name} --profile devtest-sso"
+    command = <<EOT
+      # Ensure kubeconfig directory exists
+      $kubePath = "$env:USERPROFILE\.kube"
+      if (-Not (Test-Path $kubePath)) {
+        New-Item -ItemType Directory -Path $kubePath -Force
+      }
+      
+      # Validate existing kubeconfig or create a new one
+      $configPath = "$kubePath\config"
+      if (Test-Path $configPath) {
+        # Check if file is valid YAML
+        $fileContent = Get-Content $configPath -ErrorAction SilentlyContinue
+        if (-Not ($fileContent -match "apiVersion:")) {
+          Write-Host "Kubeconfig appears invalid, creating backup and new config"
+          $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+          Move-Item -Path $configPath -Destination "$configPath.bak.$timestamp" -Force
+          New-Item -ItemType File -Path $configPath -Force
+        }
+      } else {
+        # Create empty config if it doesn't exist
+        New-Item -ItemType File -Path $configPath -Force
+      }
+      
+      # Update kubeconfig with cluster info
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --profile ${var.aws_profile}
+    EOT
+    interpreter = ["PowerShell", "-Command"]
   }
   
   # List controller files for debugging
@@ -134,9 +160,28 @@ resource "null_resource" "apply_controllers_linux" {
     always_run = "${timestamp()}"
   }
 
-  # Configure kubectl
+  # Check for and fix kubeconfig if needed, then configure kubectl
   provisioner "local-exec" {
-    command = "aws eks update-kubeconfig --region us-west-1 --name ${local.cluster_name} --profile devtest-sso"
+    command = <<-EOT
+      # Ensure kubeconfig directory exists
+      mkdir -p ~/.kube
+      
+      # Validate existing kubeconfig or create a new one
+      if [ -f ~/.kube/config ]; then
+        # Check if file is valid YAML
+        if ! grep -q "apiVersion:" ~/.kube/config; then
+          echo "Kubeconfig appears invalid, creating backup and new config"
+          mv ~/.kube/config ~/.kube/config.bak.$(date +%s)
+          touch ~/.kube/config
+        fi
+      else
+        # Create empty config if it doesn't exist
+        touch ~/.kube/config
+      fi
+      
+      # Update kubeconfig with cluster info
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --profile ${var.aws_profile}
+    EOT
   }
   
   # List controller files for debugging
@@ -146,7 +191,13 @@ resource "null_resource" "apply_controllers_linux" {
 
   # Apply namespace manifests
   provisioner "local-exec" {
-    command = "kubectl apply -f ${nirmata_cluster_registered.eks-registered.controller_yamls_folder}/temp-01-*"
+    command = <<-EOT
+      export CONTROLLER_FOLDER="${nirmata_cluster_registered.eks-registered.controller_yamls_folder}"
+      for file in $CONTROLLER_FOLDER/temp-01-*; do
+        echo "Applying namespace file: $file"
+        kubectl apply -f $file
+      done
+    EOT
   }
 
   # Wait for namespace to be ready
@@ -156,7 +207,13 @@ resource "null_resource" "apply_controllers_linux" {
 
   # Apply service account manifests
   provisioner "local-exec" {
-    command = "kubectl apply -f ${nirmata_cluster_registered.eks-registered.controller_yamls_folder}/temp-02-*"
+    command = <<-EOT
+      export CONTROLLER_FOLDER="${nirmata_cluster_registered.eks-registered.controller_yamls_folder}"
+      for file in $CONTROLLER_FOLDER/temp-02-*; do
+        echo "Applying service account file: $file"
+        kubectl apply -f $file
+      done
+    EOT
   }
 
   # Wait for service accounts to be ready
@@ -166,7 +223,13 @@ resource "null_resource" "apply_controllers_linux" {
 
   # Apply CRD manifests
   provisioner "local-exec" {
-    command = "kubectl apply -f ${nirmata_cluster_registered.eks-registered.controller_yamls_folder}/temp-03-*"
+    command = <<-EOT
+      export CONTROLLER_FOLDER="${nirmata_cluster_registered.eks-registered.controller_yamls_folder}"
+      for file in $CONTROLLER_FOLDER/temp-03-*; do
+        echo "Applying CRD file: $file"
+        kubectl apply -f $file
+      done
+    EOT
   }
 
   # Wait for CRDs to be ready
@@ -176,7 +239,13 @@ resource "null_resource" "apply_controllers_linux" {
 
   # Apply deployment manifests
   provisioner "local-exec" {
-    command = "kubectl apply -f ${nirmata_cluster_registered.eks-registered.controller_yamls_folder}/temp-04-*"
+    command = <<-EOT
+      export CONTROLLER_FOLDER="${nirmata_cluster_registered.eks-registered.controller_yamls_folder}"
+      for file in $CONTROLLER_FOLDER/temp-04-*; do
+        echo "Applying deployment file: $file"
+        kubectl apply -f $file
+      done
+    EOT
   }
 }
 
@@ -204,4 +273,33 @@ output "controller_crd_yamls_count" {
 output "controller_deploy_yamls_count" {
   description = "Number of deployment YAML files"
   value       = nirmata_cluster_registered.eks-registered.controller_deploy_yamls_count
+}
+
+resource "null_resource" "aws_eks_update_kubeconfig" {
+  depends_on = [
+    nirmata_cluster_registered.eks-registered
+  ]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Ensure kubeconfig directory exists
+      mkdir -p ~/.kube
+      
+      # Validate existing kubeconfig or create a new one
+      if [ -f ~/.kube/config ]; then
+        # Check if file is valid YAML
+        if ! grep -q "apiVersion:" ~/.kube/config; then
+          echo "Kubeconfig appears invalid, creating backup and new config"
+          mv ~/.kube/config ~/.kube/config.bak.$(date +%s)
+          touch ~/.kube/config
+        fi
+      else
+        # Create empty config if it doesn't exist
+        touch ~/.kube/config
+      fi
+      
+      # Update kubeconfig with cluster info
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --profile ${var.aws_profile}
+    EOT
+  }
 } 

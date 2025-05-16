@@ -1,6 +1,50 @@
-# Replace with your actual Nirmata API token
+# =================================
+# REQUIRED PARAMETERS
+# =================================
+
+# Nirmata API token - required for registering the cluster with Nirmata
+# This is the token generated from the Nirmata console under Settings → API Tokens → Add Token
 nirmata_token = "your-nirmata-api-token-here"
 
-# Nirmata cluster configuration
-nirmata_cluster_name = "your-cluster-name"
-nirmata_cluster_type = "default-addons-type" 
+# =================================
+# NIRMATA CONFIGURATION
+# =================================
+
+# URL for the Nirmata environment (default: https://nirmata.io)
+# nirmata_url = "https://nirmata.io"
+
+# Name that will be displayed in Nirmata console for this cluster
+nirmata_cluster_name = "eks-nirmata-cluster"
+
+# Cluster type for controller deployment in Nirmata
+# This must match a valid cluster type in your Nirmata environment
+nirmata_cluster_type = "default-addons-type"
+
+# =================================
+# EKS CLUSTER CONFIGURATION
+# =================================
+
+# Name of the EKS cluster
+# cluster_name = "eks-cluster"
+
+# Kubernetes version to use for the EKS cluster
+# cluster_version = "1.32"
+
+# AWS region where the cluster will be created
+# aws_region = "us-west-1"
+
+# AWS profile to use for authentication
+# aws_profile = "your-aws-profile"
+
+# =================================
+# NETWORK CONFIGURATION
+# =================================
+
+# VPC ID where the EKS cluster will be created
+# vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
+
+# Subnet IDs where the EKS cluster nodes will be deployed
+# subnet_ids = ["subnet-xxxxxxxxxxxxxxxxx", "subnet-yyyyyyyyyyyyyyyyy"]
+
+# Security Group ID for VPN access
+# vpn_sg_id = "sg-xxxxxxxxxxxxxxxxx" 

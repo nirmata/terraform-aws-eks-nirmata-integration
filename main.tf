@@ -1,6 +1,6 @@
 provider "aws" {
-  region = "us-west-1"
-  profile = "devtest-sso"  # IAM role using DevTest SSO profile
+  region = var.aws_region
+  profile = var.aws_profile
 }
 
 terraform {

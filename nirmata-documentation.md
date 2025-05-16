@@ -10,12 +10,14 @@ With a single `terraform apply` command, this solution will:
 2. Register the cluster with Nirmata
 3. Automatically download and apply Nirmata controller manifests
 4. Work on both Windows and Linux systems without modification
+5. Handle kubeconfig validation and recovery automatically
 
 ## Quick Start
 
 ```bash
-# 1. Configure your Nirmata token in terraform.tfvars
-echo 'nirmata_token = "your-token-here"' > terraform.tfvars
+# 1. Configure your variables in terraform.tfvars
+cp terraform.tfvars.example terraform.tfvars
+# Edit the file to add your Nirmata token and other required values
 
 # 2. Initialize and apply
 terraform init
@@ -36,6 +38,7 @@ Our solution uses:
 - `null_resource` with `local-exec` provisioners to run commands after registration
 - Proper `depends_on` to ensure the correct sequence of operations
 - Automatic OS detection to use the right commands for your platform
+- Robust kubeconfig validation and repair to prevent common failures
 
 ### Cross-Platform Compatibility
 
@@ -61,6 +64,61 @@ This simple code detects your OS and activates the appropriate resource:
 - Uses shell globbing with asterisks
 - Uses `sleep` command for pauses
 
+### Robust Kubeconfig Handling
+
+A common source of failure is corrupted or invalid kubeconfig files. Our solution includes:
+
+```hcl
+# For Linux/Unix
+provisioner "local-exec" {
+  command = <<-EOT
+    # Ensure kubeconfig directory exists
+    mkdir -p ~/.kube
+    
+    # Validate existing kubeconfig or create a new one
+    if [ -f ~/.kube/config ]; then
+      # Check if file is valid YAML
+      if ! grep -q "apiVersion:" ~/.kube/config; then
+        echo "Kubeconfig appears invalid, creating backup and new config"
+        mv ~/.kube/config ~/.kube/config.bak.$(date +%s)
+        touch ~/.kube/config
+      fi
+    else
+      # Create empty config if it doesn't exist
+      touch ~/.kube/config
+    fi
+    
+    # Update kubeconfig with cluster info
+    aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --profile ${var.aws_profile}
+  EOT
+}
+```
+
+Similar logic is implemented for Windows environments, ensuring your kubeconfig is always valid.
+
+### Individual File Handling
+
+Instead of using wildcards which can be unreliable, our solution uses explicit file loops:
+
+```hcl
+# For Linux/Unix
+provisioner "local-exec" {
+  command = <<-EOT
+    export CONTROLLER_FOLDER="${nirmata_cluster_registered.eks-registered.controller_yamls_folder}"
+    for file in $CONTROLLER_FOLDER/temp-01-*; do
+      echo "Applying namespace file: $file"
+      kubectl apply -f $file
+    done
+  EOT
+}
+```
+
+This approach:
+- Makes sure every file is individually applied
+- Provides detailed feedback on each operation
+- Handles any filename variations
+- Ensures consistent behavior across platforms
+
 ### The Controller Application Sequence
 
 Controllers are applied in the correct order:
@@ -72,6 +130,36 @@ Controllers are applied in the correct order:
 With appropriate waits between steps to ensure resources are ready.
 
 ## Troubleshooting
+
+### Kubeconfig Issues
+
+If you encounter problems with your kubeconfig:
+
+```bash
+# Reset your kubeconfig
+rm ~/.kube/config && touch ~/.kube/config
+
+# Reconfigure with your cluster
+aws eks update-kubeconfig --region ${AWS_REGION} --name ${CLUSTER_NAME} --profile ${AWS_PROFILE}
+```
+
+### Variable Configuration
+
+All configuration parameters can be set in `terraform.tfvars`:
+
+```hcl
+# Required
+nirmata_token = "your-token-here"
+nirmata_url = "https://nirmata.io"  # Or your specific Nirmata instance URL
+
+# Optional - customize as needed
+nirmata_cluster_name = "eks-cluster"
+nirmata_cluster_type = "default-addons-type"
+cluster_name = "eks-cluster"
+cluster_version = "1.32"
+aws_region = "us-west-1"
+aws_profile = "default"
+```
 
 ### Backup Files
 
@@ -100,20 +188,34 @@ terraform apply
 
 ### Manual Controller Application
 
-If automatic controller deployment fails, you can manually apply them:
+If automatic controller deployment fails, you can manually apply each file:
 
 ```bash
+# Get the controller files folder
+FOLDER=$(terraform output -raw controller_yamls_folder)
+
 # Apply namespace manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-01-*
+for file in $FOLDER/temp-01-*; do
+  kubectl apply -f $file
+done
 
-# Apply service account manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-02-*
+# Apply service account manifests (after waiting 10s)
+sleep 10
+for file in $FOLDER/temp-02-*; do
+  kubectl apply -f $file
+done
 
-# Apply CRD manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-03-*
+# Apply CRD manifests (after waiting 10s) 
+sleep 10
+for file in $FOLDER/temp-03-*; do
+  kubectl apply -f $file
+done
 
-# Apply deployment manifests
-kubectl apply -f $(terraform output -raw controller_yamls_folder)/temp-04-*
+# Apply deployment manifests (after waiting 20s)
+sleep 20
+for file in $FOLDER/temp-04-*; do
+  kubectl apply -f $file
+done
 ```
 
 ## Verification
