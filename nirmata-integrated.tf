@@ -275,7 +275,47 @@ output "controller_deploy_yamls_count" {
   value       = nirmata_cluster_registered.eks-registered.controller_deploy_yamls_count
 }
 
-resource "null_resource" "aws_eks_update_kubeconfig" {
+resource "null_resource" "aws_eks_update_kubeconfig_windows" {
+  count = local.is_windows ? 1 : 0
+
+  depends_on = [
+    nirmata_cluster_registered.eks-registered
+  ]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      # Ensure kubeconfig directory exists
+      $kubePath = "$env:USERPROFILE\.kube"
+      if (-Not (Test-Path $kubePath)) {
+        New-Item -ItemType Directory -Path $kubePath -Force
+      }
+      
+      # Validate existing kubeconfig or create a new one
+      $configPath = "$kubePath\config"
+      if (Test-Path $configPath) {
+        # Check if file is valid YAML
+        $fileContent = Get-Content $configPath -ErrorAction SilentlyContinue
+        if (-Not ($fileContent -match "apiVersion:")) {
+          Write-Host "Kubeconfig appears invalid, creating backup and new config"
+          $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+          Move-Item -Path $configPath -Destination "$configPath.bak.$timestamp" -Force
+          New-Item -ItemType File -Path $configPath -Force
+        }
+      } else {
+        # Create empty config if it doesn't exist
+        New-Item -ItemType File -Path $configPath -Force
+      }
+      
+      # Update kubeconfig with cluster info
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${local.cluster_name} --profile ${var.aws_profile}
+    EOT
+    interpreter = ["PowerShell", "-Command"]
+  }
+}
+
+resource "null_resource" "aws_eks_update_kubeconfig_linux" {
+  count = local.is_windows ? 0 : 1
+
   depends_on = [
     nirmata_cluster_registered.eks-registered
   ]
