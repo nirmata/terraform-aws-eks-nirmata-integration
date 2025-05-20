@@ -1,6 +1,6 @@
-# EKS-Nirmata Integration
+# Terraform AWS EKS Nirmata Integration
 
-This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirmata, and automatically deploys Nirmata controllers in a single operation. The implementation is cross-platform compatible, working on both Windows and Linux/Unix environments.
+This Terraform module creates an AWS EKS 1.32 cluster, registers it with Nirmata, and automatically deploys Nirmata controllers in a single operation. The implementation is cross-platform compatible, working on both Windows and Linux/Unix environments.
 
 ## Requirements
 
@@ -72,8 +72,8 @@ This Terraform configuration creates an EKS 1.32 cluster, registers it with Nirm
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/nirmata/eks-nirmata-integration.git
-   cd eks-nirmata-integration
+   git clone https://github.com/nirmata/terraform-aws-eks-nirmata-integration.git
+   cd terraform-aws-eks-nirmata-integration
    ```
 
 2. **Create terraform.tfvars File**:
