@@ -33,4 +33,9 @@ module "eks" {
   vpc_id          = var.vpc_id
   subnet_ids      = var.subnet_ids
   vpn_sg_id       = var.vpn_sg_id
+  
+  # IAM role configuration
+  use_existing_roles      = var.use_existing_roles
+  existing_cluster_role_name = var.existing_cluster_role_name
+  existing_node_role_name   = var.existing_node_role_name
 } 

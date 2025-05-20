@@ -1,11 +1,11 @@
 output "cluster_id" {
   description = "EKS cluster ID"
-  value       = aws_eks_cluster.eks_cluster.id
+  value       = local.cluster_name
 }
 
 output "cluster_endpoint" {
   description = "Endpoint for EKS control plane"
-  value       = aws_eks_cluster.eks_cluster.endpoint
+  value       = local.cluster_endpoint
 }
 
 output "cluster_security_group_id" {
@@ -15,25 +15,25 @@ output "cluster_security_group_id" {
 
 output "cluster_arn" {
   description = "ARN of the EKS cluster"
-  value       = aws_eks_cluster.eks_cluster.arn
+  value       = var.use_existing_roles ? aws_eks_cluster.eks_cluster_with_existing_role[0].arn : aws_eks_cluster.eks_cluster_with_new_role[0].arn
 }
 
 output "cluster_certificate_authority_data" {
   description = "Base64 encoded certificate data required to communicate with the cluster"
-  value       = aws_eks_cluster.eks_cluster.certificate_authority[0].data
+  value       = local.cluster_certificate_authority_data
 }
 
 output "node_group_id" {
   description = "EKS Node Group ID"
-  value       = aws_eks_node_group.eks_node_group.id
+  value       = var.use_existing_roles ? aws_eks_node_group.eks_node_group_existing_role[0].id : aws_eks_node_group.eks_node_group_new_role[0].id
 }
 
 output "node_group_arn" {
   description = "ARN of the EKS Node Group"
-  value       = aws_eks_node_group.eks_node_group.arn
+  value       = var.use_existing_roles ? aws_eks_node_group.eks_node_group_existing_role[0].arn : aws_eks_node_group.eks_node_group_new_role[0].arn
 }
 
 output "node_group_status" {
   description = "Status of the EKS Node Group"
-  value       = aws_eks_node_group.eks_node_group.status
+  value       = var.use_existing_roles ? aws_eks_node_group.eks_node_group_existing_role[0].status : aws_eks_node_group.eks_node_group_new_role[0].status
 } 

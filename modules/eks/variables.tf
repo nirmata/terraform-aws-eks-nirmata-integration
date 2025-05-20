@@ -21,4 +21,22 @@ variable "subnet_ids" {
 variable "vpn_sg_id" {
   description = "Security Group ID for VPN access"
   type        = string
+}
+
+variable "use_existing_roles" {
+  description = "Whether to use existing IAM roles instead of creating new ones"
+  type        = bool
+  default     = false
+}
+
+variable "existing_cluster_role_name" {
+  description = "Name of existing IAM role for EKS cluster (if use_existing_roles is true)"
+  type        = string
+  default     = ""
+}
+
+variable "existing_node_role_name" {
+  description = "Name of existing IAM role for EKS node group (if use_existing_roles is true)"
+  type        = string
+  default     = ""
 } 
