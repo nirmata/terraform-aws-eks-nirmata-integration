@@ -39,3 +39,7 @@ controller_files.txt
 # But include our specific platform backup files
 !nirmata-integrated-windows.tf.backup
 !nirmata-integrated-linux.tf.backup 
+.gitnexus
+AGENTS.md
+CLAUDE.md
+.claude/

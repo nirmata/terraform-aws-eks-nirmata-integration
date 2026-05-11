@@ -13,14 +13,6 @@ terraform {
       source  = "nirmata/nirmata"
       version = "~> 1.1"
     }
-    kubectl = {
-      source  = "gavinbunney/kubectl"
-      version = "~> 1.14"
-    }
-    null = {
-      source  = "hashicorp/null"
-      version = "~> 3.0"
-    }
   }
   required_version = ">= 1.2.0"
 }
