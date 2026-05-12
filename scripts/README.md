@@ -16,7 +16,7 @@ infra + Nirmata registration only; this script does everything that needs
 2. Calls the Nirmata API to look up the cluster's internal ID by name
 3. Downloads the controller manifest bundle from `GET /cluster/api/KubernetesCluster/<id>/controllerYAML`
 4. Splits the bundle into four ordered buckets: namespaces → service accounts → CRDs/RBAC/config → deployments
-5. (Optional) Rewrites `image:` lines in deployment manifests to point at a private-registry image
+5. (Optional) Rewrites `image:` lines in specific deployment manifests per `NIRMATA_KUBE_CONTROLLER_IMAGE` / `OTEL_AGENT_IMAGE`, matched on `metadata.name`
 6. (Optional) Creates an `artifactory-secret` `docker-registry` secret in the `nirmata` namespace
 7. (Optional) Patches every ServiceAccount in the `nirmata` namespace to use that secret as an `imagePullSecret`
 8. Applies each bucket in order with waits in between, then prints pod status
@@ -67,13 +67,28 @@ These come straight from your TFE workspace outputs (`cluster_name`, `aws_region
 | `AWS_PROFILE`          | `default`              | AWS CLI profile                                     |
 | `KUBECONFIG`           | `~/.kube/config`       | Path to kubeconfig                                  |
 
-### Optional image override
+### Optional per-deployment image overrides
 
-| Name    | Description                                                  |
-|---------|--------------------------------------------------------------|
-| `IMAGE` | If set, replaces **every** `image:` line in the downloaded deployment manifests with this value. Use this when you've mirrored the controller image into a private registry. |
+Each override is matched against the deployment's `metadata.name` and only
+rewrites the `image:` lines inside that one Deployment manifest. Deployments
+with no matching override are left untouched.
 
-> **Caveat:** the override is global across all deployments in the bundle. If Nirmata returns multiple deployments with distinct images (e.g. `kyverno` and `policy-reporter`), setting `IMAGE` will point them all at the same image — which would break things. In that case, leave `IMAGE` unset and configure a registry mirror in your container runtime instead.
+| Name                            | Targets Deployment       | Description                          |
+|---------------------------------|--------------------------|--------------------------------------|
+| `NIRMATA_KUBE_CONTROLLER_IMAGE` | `nirmata-kube-controller` | Image for the Nirmata kube-controller |
+| `OTEL_AGENT_IMAGE`              | `otel-agent`              | Image for the OpenTelemetry agent     |
+
+Setting one without the other is fine — only the configured deployments are
+rewritten.
+
+If you configure an override and the script can't find a Deployment whose
+`metadata.name` matches, it logs a warning (likely a typo in the env var or
+a renamed controller in a new Nirmata release) and continues without
+touching any deployment.
+
+> **Extending:** to add another per-deployment override later, append a line
+> to the `IMAGE_OVERRIDES` map near the top of the script. The matching and
+> rewrite logic is generic.
 
 ### Optional private-registry pull secret
 
@@ -108,13 +123,14 @@ export NIRMATA_TOKEN=xxxxxxxxxxxx
 ./apply-nirmata-controllers.sh my-eks-cluster us-west-2
 ```
 
-### Private registry (image override + pull secret)
+### Private registry (per-deployment image overrides + pull secret)
 
 ```bash
 export NIRMATA_TOKEN=xxxxxxxxxxxx
 
-# Image mirror in your artifactory
-export IMAGE=my.artifactory.com/nirmata/kyverno:v1.13.2
+# Per-deployment image mirrors in your artifactory
+export NIRMATA_KUBE_CONTROLLER_IMAGE=my.artifactory.com/nirmata/kube-controller:v1.13.2
+export OTEL_AGENT_IMAGE=my.artifactory.com/nirmata/otel-agent:v0.110.0
 
 # Credentials that the cluster will use to pull from artifactory
 export DOCKER_USERNAME=svc-nirmata-pull
@@ -149,7 +165,7 @@ export DOCKER_SERVER=...
 3. apply 02-sa         (service accounts)        wait 10s
 4. patch each SA with imagePullSecrets           (if creds provided)
 5. apply 03-other      (CRDs / RBAC / config)    wait 20s
-6. apply 04-deploy     (deployments, IMAGE rewritten if set)
+6. apply 04-deploy     (deployments, with per-deployment image overrides applied)
 7. verify              (kubectl get pods -n nirmata)
 ```
 
@@ -182,10 +198,10 @@ Re-running the script is safe:
 | `kubectl apply -f` | Upsert — unchanged objects are no-ops                       |
 | Pull secret create | `dry-run \| apply` — re-applies the same secret             |
 | SA patch           | Strategic merge keyed on secret name — won't duplicate      |
-| Image rewrite      | Operates on a fresh download each run                       |
+| Per-deploy image rewrite | Operates on a fresh download each run; keyed by metadata.name |
 
-You can re-run after rotating the docker password, after updating `IMAGE`,
-or just to retry a partial failure.
+You can re-run after rotating the docker password, after updating an image
+override, or just to retry a partial failure.
 
 ---
 

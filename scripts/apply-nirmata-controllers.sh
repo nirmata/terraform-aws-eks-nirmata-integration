@@ -32,11 +32,16 @@
 #   AWS_PROFILE            AWS CLI profile (default: default)
 #   KUBECONFIG             Path to kubeconfig (default: ~/.kube/config)
 #
-# Optional image-override env var:
-#   IMAGE                  If set, replaces every `image:` line in the
-#                          downloaded Deployment manifests with this value.
-#                          Use this when you have mirrored the controller
-#                          image into a private registry.
+# Optional per-deployment image overrides:
+#   NIRMATA_KUBE_CONTROLLER_IMAGE  If set, replaces every `image:` line in
+#                                  the Deployment whose metadata.name is
+#                                  'nirmata-kube-controller'.
+#   OTEL_AGENT_IMAGE               Same, for the Deployment whose
+#                                  metadata.name is 'otel-agent'.
+#
+#   Each override is matched on metadata.name and only touches that one
+#   Deployment manifest. Deployments without a matching override are left
+#   untouched.
 #
 # Optional private-registry pull-secret env vars (all three or none):
 #   DOCKER_USERNAME        Username for the private registry
@@ -57,7 +62,8 @@
 #
 # Usage:
 #   export NIRMATA_TOKEN=xxxxxxxxxxxx
-#   export IMAGE=my.artifactory.com/nirmata/kyverno:v1.13.2
+#   export NIRMATA_KUBE_CONTROLLER_IMAGE=my.artifactory.com/nirmata/kube-controller:v1.x
+#   export OTEL_AGENT_IMAGE=my.artifactory.com/nirmata/otel-agent:v0.y
 #   export DOCKER_USERNAME=svc-nirmata-pull
 #   export DOCKER_PASSWORD=xxxxxxxxxxxx
 #   export DOCKER_SERVER=my.artifactory.com
@@ -82,7 +88,12 @@ NIRMATA_CLUSTER_NAME="${NIRMATA_CLUSTER_NAME:-$CLUSTER_NAME}"
 NIRMATA_NAMESPACE="${NIRMATA_NAMESPACE:-nirmata}"
 AWS_PROFILE="${AWS_PROFILE:-default}"
 
-IMAGE="${IMAGE:-}"
+# Per-deployment image overrides, keyed on metadata.name.
+# Add more entries here if Nirmata introduces additional controllers.
+declare -A IMAGE_OVERRIDES=()
+[[ -n "${NIRMATA_KUBE_CONTROLLER_IMAGE:-}" ]] && IMAGE_OVERRIDES[nirmata-kube-controller]="$NIRMATA_KUBE_CONTROLLER_IMAGE"
+[[ -n "${OTEL_AGENT_IMAGE:-}" ]]              && IMAGE_OVERRIDES[otel-agent]="$OTEL_AGENT_IMAGE"
+
 IMAGE_PULL_SECRET_NAME="${IMAGE_PULL_SECRET_NAME:-artifactory-secret}"
 DOCKER_USERNAME="${DOCKER_USERNAME:-}"
 DOCKER_PASSWORD="${DOCKER_PASSWORD:-}"
@@ -195,17 +206,57 @@ awk -v OUT="$WORK_DIR" '
   }
 ' "$MANIFEST_FILE"
 
-# ─── 4b. Override container image in deployment manifests (if requested) ───
-if [[ -n "$IMAGE" ]]; then
-  log "Overriding all container images in deployment manifests with: $IMAGE"
+# ─── 4b. Per-deployment image overrides ────────────────────────────────────
+# For each Deployment YAML in 04-deploy/, extract its metadata.name and, if
+# we have an override for it, rewrite every `image:` line in that file.
+# Deployments with no matching override are left untouched.
+extract_metadata_name() {
+  # Reads a single-document Deployment YAML and prints metadata.name.
+  # State machine: enter the top-level `metadata:` block, capture the first
+  # `name:` key at deeper indentation, then exit. This avoids matching
+  # `name:` keys nested under containers, ports, env, etc.
+  awk '
+    BEGIN { in_meta = 0 }
+    /^metadata:[[:space:]]*$/                { in_meta = 1; next }
+    in_meta && /^[^[:space:]]/               { in_meta = 0 }
+    in_meta && /^[[:space:]]+name:[[:space:]]+/ {
+      sub(/^[[:space:]]+name:[[:space:]]+/, "")
+      gsub(/["'\'']/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+if (( ${#IMAGE_OVERRIDES[@]} > 0 )); then
+  log "Applying per-deployment image overrides..."
+  declare -A SEEN=()
   shopt -s nullglob
   for f in "$WORK_DIR/04-deploy"/*.yaml; do
-    # Match "image: ..." lines (any leading whitespace, optional quotes).
-    # Preserve indentation; replace value with $IMAGE.
-    sed -E -i.bak "s|^([[:space:]]*image:[[:space:]]*).+\$|\1${IMAGE}|" "$f"
-    rm -f "$f.bak"
+    dep_name="$(extract_metadata_name "$f")"
+    if [[ -z "$dep_name" ]]; then
+      log "  (skipping $f: could not determine metadata.name)"
+      continue
+    fi
+    SEEN[$dep_name]=1
+    if [[ -n "${IMAGE_OVERRIDES[$dep_name]:-}" ]]; then
+      new_img="${IMAGE_OVERRIDES[$dep_name]}"
+      log "  $dep_name → $new_img"
+      sed -E -i.bak "s|^([[:space:]]*image:[[:space:]]*).+\$|\1${new_img}|" "$f"
+      rm -f "$f.bak"
+    else
+      log "  $dep_name (no override; leaving image unchanged)"
+    fi
   done
   shopt -u nullglob
+
+  # Warn if any configured override didn't match a deployment (likely a typo).
+  for k in "${!IMAGE_OVERRIDES[@]}"; do
+    if [[ -z "${SEEN[$k]:-}" ]]; then
+      log "  WARNING: override configured for '$k' but no Deployment with that metadata.name was found"
+    fi
+  done
 fi
 
 # ─── Apply helpers ─────────────────────────────────────────────────────────
