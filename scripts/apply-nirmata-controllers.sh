@@ -176,6 +176,18 @@ jq -r 'to_entries[0].value' "$RAW_JSON" > "$MANIFEST_FILE" \
 [[ -s "$MANIFEST_FILE" ]] || fail "Extracted manifest is empty."
 log "Got $(wc -l < "$MANIFEST_FILE" | tr -d ' ') lines of manifest data."
 
+# ─── 3b. Rewrite Nirmata's default imagePullSecret name ────────────────────
+# Nirmata-generated manifests reference 'nirmata-controller-registry-secret'
+# as the imagePullSecret. Rewrite every occurrence to ${IMAGE_PULL_SECRET_NAME}
+# (default: artifactory-secret) so the secret we create below actually matches
+# what the downloaded Deployments and ServiceAccounts ask for.
+NIRMATA_DEFAULT_PULL_SECRET_NAME="nirmata-controller-registry-secret"
+if [[ "$IMAGE_PULL_SECRET_NAME" != "$NIRMATA_DEFAULT_PULL_SECRET_NAME" ]]; then
+  log "Rewriting imagePullSecret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' → '${IMAGE_PULL_SECRET_NAME}' in downloaded manifests..."
+  sed -i.bak "s|${NIRMATA_DEFAULT_PULL_SECRET_NAME}|${IMAGE_PULL_SECRET_NAME}|g" "$MANIFEST_FILE"
+  rm -f "${MANIFEST_FILE}.bak"
+fi
+
 # ─── 4. Split into individual documents and classify by kind ───────────────
 mkdir -p "$WORK_DIR/01-ns" "$WORK_DIR/02-sa" "$WORK_DIR/03-other" "$WORK_DIR/04-deploy"
 

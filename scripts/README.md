@@ -17,7 +17,8 @@ infra + Nirmata registration only; this script does everything that needs
 3. Downloads the controller manifest bundle from `GET /cluster/api/KubernetesCluster/<id>/controllerYAML`
 4. Splits the bundle into four ordered buckets: namespaces → service accounts → CRDs/RBAC/config → deployments
 5. (Optional) Rewrites `image:` lines in specific deployment manifests per `NIRMATA_KUBE_CONTROLLER_IMAGE` / `OTEL_AGENT_IMAGE`, matched on `metadata.name`
-6. (Optional) Creates an `artifactory-secret` `docker-registry` secret in the `nirmata` namespace
+6. Rewrites `nirmata-controller-registry-secret` (the default imagePullSecret name baked into Nirmata's downloaded manifests) to `${IMAGE_PULL_SECRET_NAME}` (default: `artifactory-secret`) so the deployments and ServiceAccounts ask for the secret we actually create
+7. (Optional) Creates an `artifactory-secret` `docker-registry` secret in the `nirmata` namespace
 7. (Optional) Patches every ServiceAccount in the `nirmata` namespace to use that secret as an `imagePullSecret`
 8. Applies each bucket in order with waits in between, then prints pod status
 
