@@ -176,14 +176,49 @@ jq -r 'to_entries[0].value' "$RAW_JSON" > "$MANIFEST_FILE" \
 [[ -s "$MANIFEST_FILE" ]] || fail "Extracted manifest is empty."
 log "Got $(wc -l < "$MANIFEST_FILE" | tr -d ' ') lines of manifest data."
 
-# ─── 3b. Rewrite Nirmata's default imagePullSecret name ────────────────────
-# Nirmata-generated manifests reference 'nirmata-controller-registry-secret'
-# as the imagePullSecret. Rewrite every occurrence to ${IMAGE_PULL_SECRET_NAME}
-# (default: artifactory-secret) so the secret we create below actually matches
-# what the downloaded Deployments and ServiceAccounts ask for.
+# ─── 3a. Drop Nirmata's default registry Secret from the manifest ──────────
+# Nirmata's bundle ships a kind:Secret named 'nirmata-controller-registry-secret'.
+# We create our own image-pull secret (default name: artifactory-secret), so
+# skip Nirmata's so we don't fight over the same object. References to the
+# old name in SAs / Deployments are rewritten in step 3b below.
 NIRMATA_DEFAULT_PULL_SECRET_NAME="nirmata-controller-registry-secret"
+FILTERED_FILE="$WORK_DIR/controllers-filtered.yaml"
+
+awk -v target_name="$NIRMATA_DEFAULT_PULL_SECRET_NAME" '
+  BEGIN { buf = ""; first = 1; skipped = 0 }
+  /^---[[:space:]]*$/ { flush(); buf = ""; next }
+  { buf = buf $0 "\n" }
+  END { flush(); printf "%d\n", skipped > "/dev/stderr" }
+
+  function flush(   is_target_secret) {
+    if (buf ~ /^[[:space:]]*$/) { return }
+    is_target_secret = 0
+    if (buf ~ /(^|\n)kind:[[:space:]]+"?Secret"?[[:space:]]*(\n|$)/) {
+      # Only matches metadata.name at indent >=1 (Secrets have no nested name: keys)
+      if (buf ~ ("(^|\n)[[:space:]]+name:[[:space:]]+\"?" target_name "\"?[[:space:]]*(\n|$)")) {
+        is_target_secret = 1
+      }
+    }
+    if (is_target_secret) { skipped++; return }
+    if (!first) { printf "---\n" }
+    first = 0
+    printf "%s", buf
+  }
+' "$MANIFEST_FILE" > "$FILTERED_FILE" 2> "$WORK_DIR/skip-count.txt"
+
+SKIPPED_SECRETS="$(cat "$WORK_DIR/skip-count.txt" 2>/dev/null || echo 0)"
+if [[ "$SKIPPED_SECRETS" -gt 0 ]]; then
+  log "Skipped ${SKIPPED_SECRETS} occurrence(s) of Secret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' from the downloaded manifest."
+fi
+mv "$FILTERED_FILE" "$MANIFEST_FILE"
+
+# ─── 3b. Rewrite remaining references to the Nirmata-default secret name ──
+# After 3a the kind:Secret object is gone, but SAs and Deployments still
+# reference 'nirmata-controller-registry-secret' in their imagePullSecrets.
+# Rewrite those references so they point to the secret we create below
+# (default: artifactory-secret, configurable via IMAGE_PULL_SECRET_NAME).
 if [[ "$IMAGE_PULL_SECRET_NAME" != "$NIRMATA_DEFAULT_PULL_SECRET_NAME" ]]; then
-  log "Rewriting imagePullSecret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' → '${IMAGE_PULL_SECRET_NAME}' in downloaded manifests..."
+  log "Rewriting imagePullSecret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' → '${IMAGE_PULL_SECRET_NAME}' in remaining manifests..."
   sed -i.bak "s|${NIRMATA_DEFAULT_PULL_SECRET_NAME}|${IMAGE_PULL_SECRET_NAME}|g" "$MANIFEST_FILE"
   rm -f "${MANIFEST_FILE}.bak"
 fi
