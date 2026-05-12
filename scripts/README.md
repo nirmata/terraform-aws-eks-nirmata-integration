@@ -16,7 +16,7 @@ infra + Nirmata registration only; this script does everything that needs
 2. Calls the Nirmata API to look up the cluster's internal ID by name
 3. Downloads the controller manifest bundle from `GET /cluster/api/KubernetesCluster/<id>/controllerYAML`
 4. Splits the bundle into four ordered buckets: namespaces → service accounts → CRDs/RBAC/config → deployments
-5. (Optional) Rewrites `image:` lines in specific deployment manifests per `NIRMATA_KUBE_CONTROLLER_IMAGE` / `OTEL_AGENT_IMAGE`, matched on `metadata.name`
+5. (Optional) Rewrites `image:` lines in specific deployment manifests per `NIRMATA_KUBE_CONTROLLER_IMAGE` / `OTEL_AGENT_IMAGE`, matched on `metadata.name`. (Optional) Injects `NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS` (e.g. `-insecure`) into the `nirmata-kube-controller` container's `args:` list.
 6. Drops the `kind: Secret` named `nirmata-controller-registry-secret` from the downloaded bundle — we manage the image-pull secret ourselves so Nirmata's copy is not installed
 7. Rewrites every remaining reference to `nirmata-controller-registry-secret` (in ServiceAccount and Deployment `imagePullSecrets`) to `${IMAGE_PULL_SECRET_NAME}` (default: `artifactory-secret`) so the deployments and ServiceAccounts ask for the secret we actually create
 8. (Optional) Creates an `artifactory-secret` `docker-registry` secret in the `nirmata` namespace
@@ -80,6 +80,22 @@ with no matching override are left untouched.
 | `NIRMATA_KUBE_CONTROLLER_IMAGE` | `nirmata-kube-controller` | Image for the Nirmata kube-controller |
 | `OTEL_AGENT_IMAGE`              | `otel-agent`              | Image for the OpenTelemetry agent     |
 
+### Optional nirmata-kube-controller container-arg injection
+
+| Name                                | Description                          |
+|-------------------------------------|--------------------------------------|
+| `NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS` | Space-separated arguments appended to the `args:` list of the `nirmata-kube-controller` container. Common use: `-insecure` to skip TLS verification when the controller can't validate the certificate of a private Nirmata endpoint. |
+
+The injection is indent-aware: it scopes the modification to the container
+whose `name: nirmata-kube-controller` is at the top container level, so
+`- name:` keys inside `env:` blocks and other containers (init containers,
+sidecars) in the same deployment are left untouched.
+
+If the env var is set but no Deployment with `metadata.name:
+nirmata-kube-controller` is found, the script logs a warning and continues.
+If the container has no `args:` section to inject into, the script also
+warns and skips.
+
 Setting one without the other is fine — only the configured deployments are
 rewritten.
 
@@ -125,7 +141,7 @@ export NIRMATA_TOKEN=xxxxxxxxxxxx
 ./apply-nirmata-controllers.sh my-eks-cluster us-west-2
 ```
 
-### Private registry (per-deployment image overrides + pull secret)
+### Private registry (per-deployment image overrides + pull secret + insecure flag)
 
 ```bash
 export NIRMATA_TOKEN=xxxxxxxxxxxx
@@ -133,6 +149,9 @@ export NIRMATA_TOKEN=xxxxxxxxxxxx
 # Per-deployment image mirrors in your artifactory
 export NIRMATA_KUBE_CONTROLLER_IMAGE=my.artifactory.com/nirmata/kube-controller:v1.13.2
 export OTEL_AGENT_IMAGE=my.artifactory.com/nirmata/otel-agent:v0.110.0
+
+# Skip TLS verification for the kube-controller (private endpoint w/ self-signed cert)
+export NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS="-insecure"
 
 # Credentials that the cluster will use to pull from artifactory
 export DOCKER_USERNAME=svc-nirmata-pull

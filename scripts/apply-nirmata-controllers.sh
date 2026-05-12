@@ -43,6 +43,12 @@
 #   Deployment manifest. Deployments without a matching override are left
 #   untouched.
 #
+# Optional nirmata-kube-controller container-arg injection:
+#   NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS
+#       Space-separated args appended to the container's args list.
+#       Example: '-insecure' to bypass TLS verification when the controller
+#       cannot validate the certificate of a private endpoint.
+#
 # Optional private-registry pull-secret env vars (all three or none):
 #   DOCKER_USERNAME        Username for the private registry
 #   DOCKER_PASSWORD        Password / token for the private registry
@@ -93,6 +99,11 @@ AWS_PROFILE="${AWS_PROFILE:-default}"
 declare -A IMAGE_OVERRIDES=()
 [[ -n "${NIRMATA_KUBE_CONTROLLER_IMAGE:-}" ]] && IMAGE_OVERRIDES[nirmata-kube-controller]="$NIRMATA_KUBE_CONTROLLER_IMAGE"
 [[ -n "${OTEL_AGENT_IMAGE:-}" ]]              && IMAGE_OVERRIDES[otel-agent]="$OTEL_AGENT_IMAGE"
+
+# Extra container args to inject into the nirmata-kube-controller container.
+# Space-separated. Useful for e.g. '-insecure' when the controller needs to
+# bypass TLS verification against a private registry / Nirmata endpoint.
+NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS="${NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS:-}"
 
 IMAGE_PULL_SECRET_NAME="${IMAGE_PULL_SECRET_NAME:-artifactory-secret}"
 DOCKER_USERNAME="${DOCKER_USERNAME:-}"
@@ -304,6 +315,90 @@ if (( ${#IMAGE_OVERRIDES[@]} > 0 )); then
       log "  WARNING: override configured for '$k' but no Deployment with that metadata.name was found"
     fi
   done
+fi
+
+# ─── 4c. Inject extra args into nirmata-kube-controller container ──────────
+# Useful for flags like '-insecure' that the controller needs to talk to a
+# private endpoint with a self-signed or non-public-CA TLS certificate.
+inject_container_args() {
+  local file="$1"
+  local extra_args="$2"
+  local tmp="$file.tmp"
+
+  awk -v EXTRA_ARGS_STR="$extra_args" '
+    function get_indent(s) {
+      match(s, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    BEGIN {
+      state = "outside"
+      n_extra = split(EXTRA_ARGS_STR, extra, /[[:space:]]+/)
+      cleaned_n = 0
+      for (i = 1; i <= n_extra; i++) {
+        if (extra[i] != "") {
+          cleaned_n++
+          cleaned[cleaned_n] = extra[i]
+        }
+      }
+    }
+    {
+      if ($0 ~ /^[[:space:]]*- name:[[:space:]]+/) {
+        this_indent = get_indent($0)
+        if ($0 ~ /^[[:space:]]*- name:[[:space:]]+nirmata-kube-controller[[:space:]]*$/) {
+          if (state != "in-target" || this_indent <= container_indent) {
+            state = "in-target"
+            container_indent = this_indent
+            print
+            next
+          }
+        } else if (state == "in-target" && this_indent <= container_indent) {
+          state = "outside"
+        }
+      }
+      if (state == "in-target" && $0 ~ /^[[:space:]]+args:[[:space:]]*$/) {
+        this_indent = get_indent($0)
+        if (this_indent > container_indent) {
+          print
+          if ((getline next_line) > 0) {
+            if (next_line ~ /^[[:space:]]+- /) {
+              items_indent = get_indent(next_line)
+            } else {
+              items_indent = this_indent
+            }
+            for (i = 1; i <= cleaned_n; i++) {
+              printf "%*s- %s\n", items_indent, "", cleaned[i]
+            }
+            print next_line
+          }
+          state = "done"
+          next
+        }
+      }
+      print
+    }
+    END {
+      if (state == "in-target") {
+        printf "WARNING: nirmata-kube-controller container has no args: section; skipped injecting [%s]\n", EXTRA_ARGS_STR > "/dev/stderr"
+      }
+    }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+if [[ -n "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS" ]]; then
+  log "Injecting extra container args for nirmata-kube-controller: ${NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS}"
+  shopt -s nullglob
+  injected_any=0
+  for f in "$WORK_DIR/04-deploy"/*.yaml; do
+    dep_name="$(extract_metadata_name "$f")"
+    if [[ "$dep_name" == "nirmata-kube-controller" ]]; then
+      inject_container_args "$f" "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS"
+      injected_any=1
+    fi
+  done
+  shopt -u nullglob
+  if (( injected_any == 0 )); then
+    log "  WARNING: NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS set but no nirmata-kube-controller Deployment was found"
+  fi
 fi
 
 # ─── Apply helpers ─────────────────────────────────────────────────────────
