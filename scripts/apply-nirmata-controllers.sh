@@ -288,9 +288,12 @@ extract_metadata_name() {
 }
 
 # Rewrite the image: line of the container whose name == target inside a
-# single Deployment YAML. Uses an indent-aware state machine so init
-# containers, sidecars, and nested name: keys (e.g. in env or ports) are
-# left untouched. This mirrors the scoping done in 4c for args injection.
+# single Deployment YAML. Uses a two-pass awk that handles both common YAML
+# styles: (a) standard, where the container leads with `- name: <name>`, and
+# (b) compact, where list items share indent with the parent key and the
+# container's first field may be `args:` or `image:` rather than `name:`.
+# Quoted names (`name: "X"`) are supported. Init containers, sidecars, and
+# nested name: keys in env/port blocks are left untouched.
 override_container_image() {
   local file="$1"
   local target_container="$2"
@@ -299,32 +302,85 @@ override_container_image() {
 
   awk -v TARGET="$target_container" -v NEW_IMAGE="$new_image" '
     function get_indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
-    BEGIN { state = "outside" }
-    {
-      if ($0 ~ /^[[:space:]]*- name:[[:space:]]+/) {
-        this_indent = get_indent($0)
-        if ($0 ~ "^[[:space:]]*- name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$") {
-          if (state != "in-target" || this_indent <= container_indent) {
-            state = "in-target"; container_indent = this_indent
-            print; next
-          }
-        } else if (state == "in-target" && this_indent <= container_indent) {
-          state = "outside"
-        }
-      }
-      if (state == "in-target" && $0 ~ /^[[:space:]]+image:[[:space:]]+/) {
-        this_indent = get_indent($0)
-        if (this_indent > container_indent) {
-          printf "%*simage: %s\n", this_indent, "", NEW_IMAGE
-          state = "done"
-          next
-        }
-      }
-      print
-    }
+    { lines[NR] = $0 }
     END {
-      if (state == "outside" || state == "in-target") {
-        printf "WARNING: container %s not fully matched in %s (state=%s); image override may not have applied\n", TARGET, FILENAME, state > "/dev/stderr"
+      total = NR
+      # Locate `containers:` keyword
+      containers_kw = 0
+      for (i = 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]+containers:[[:space:]]*$/) {
+          containers_kw = i; containers_indent = get_indent(lines[i]); break
+        }
+      }
+      if (!containers_kw) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: no `containers:` keyword in %s; image override skipped\n", FILENAME > "/dev/stderr"
+        exit
+      }
+      # Find item_indent (handles both compact and indented list styles)
+      item_indent = -1
+      for (i = containers_kw + 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]*$/) continue
+        li = get_indent(lines[i])
+        if (li < containers_indent) break
+        if (li == containers_indent && lines[i] !~ /^[[:space:]]*- /) break
+        if (lines[i] ~ /^[[:space:]]*- /) { item_indent = li; break }
+      }
+      if (item_indent < 0) { for (i = 1; i <= total; i++) print lines[i]; exit }
+      # Identify container block ranges
+      n_blocks = 0
+      for (i = containers_kw + 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]*$/) continue
+        li = get_indent(lines[i]); is_dash = (lines[i] ~ /^[[:space:]]*- /)
+        if (li > item_indent) continue
+        if (li == item_indent && is_dash) {
+          if (n_blocks > 0) block_end[n_blocks] = i - 1
+          n_blocks++; block_start[n_blocks] = i; continue
+        }
+        if (n_blocks > 0) block_end[n_blocks] = i - 1
+        break
+      }
+      if (n_blocks > 0 && !(n_blocks in block_end)) block_end[n_blocks] = total
+      # Find block by `name: TARGET` (with optional dash, optional quotes)
+      target_block = 0
+      for (b = 1; b <= n_blocks; b++) {
+        for (i = block_start[b]; i <= block_end[b]; i++) {
+          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$")) {
+            target_block = b; break
+          }
+        }
+        if (target_block) break
+      }
+      if (!target_block) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: container %s not found in containers: array of %s\n", TARGET, FILENAME > "/dev/stderr"
+        exit
+      }
+      # Find image: line within target block (handle `image:` and `- image:`)
+      image_line = 0
+      for (i = block_start[target_block]; i <= block_end[target_block]; i++) {
+        if (lines[i] ~ /^[[:space:]]+image:[[:space:]]+/ || lines[i] ~ /^[[:space:]]+- image:[[:space:]]+/) {
+          image_line = i; break
+        }
+      }
+      if (!image_line) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: container %s has no image: line in %s\n", TARGET, FILENAME > "/dev/stderr"
+        exit
+      }
+      # Emit, replacing image: line and preserving the original prefix style
+      for (i = 1; i <= total; i++) {
+        if (i == image_line) {
+          if (lines[i] ~ /^[[:space:]]+- image:/) {
+            match(lines[i], /^[[:space:]]+/)
+            printf "%s- image: %s\n", substr(lines[i], 1, RLENGTH), NEW_IMAGE
+          } else {
+            match(lines[i], /^[[:space:]]+/)
+            printf "%simage: %s\n", substr(lines[i], 1, RLENGTH), NEW_IMAGE
+          }
+        } else {
+          print lines[i]
+        }
       }
     }
   ' "$file" > "$tmp" && mv "$tmp" "$file"
@@ -362,65 +418,108 @@ fi
 # ─── 4c. Inject extra args into nirmata-kube-controller container ──────────
 # Useful for flags like '-insecure' that the controller needs to talk to a
 # private endpoint with a self-signed or non-public-CA TLS certificate.
+#
+# Uses the same two-pass block-finding approach as override_container_image
+# so it handles compact YAML (containers and items at the same indent),
+# containers that lead with a field other than `name:`, quoted names, and
+# `args:` in both `args:` and `- args:` shapes.
 inject_container_args() {
   local file="$1"
-  local extra_args="$2"
+  local target_container="$2"
+  local extra_args="$3"
   local tmp="$file.tmp"
 
-  awk -v EXTRA_ARGS_STR="$extra_args" '
-    function get_indent(s) {
-      match(s, /^[[:space:]]*/)
-      return RLENGTH
-    }
+  awk -v TARGET="$target_container" -v EXTRA_ARGS_STR="$extra_args" '
+    function get_indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
     BEGIN {
-      state = "outside"
       n_extra = split(EXTRA_ARGS_STR, extra, /[[:space:]]+/)
       cleaned_n = 0
       for (i = 1; i <= n_extra; i++) {
-        if (extra[i] != "") {
-          cleaned_n++
-          cleaned[cleaned_n] = extra[i]
-        }
+        if (extra[i] != "") { cleaned_n++; cleaned[cleaned_n] = extra[i] }
       }
     }
-    {
-      if ($0 ~ /^[[:space:]]*- name:[[:space:]]+/) {
-        this_indent = get_indent($0)
-        if ($0 ~ /^[[:space:]]*- name:[[:space:]]+nirmata-kube-controller[[:space:]]*$/) {
-          if (state != "in-target" || this_indent <= container_indent) {
-            state = "in-target"
-            container_indent = this_indent
-            print
-            next
-          }
-        } else if (state == "in-target" && this_indent <= container_indent) {
-          state = "outside"
-        }
-      }
-      if (state == "in-target" && $0 ~ /^[[:space:]]+args:[[:space:]]*$/) {
-        this_indent = get_indent($0)
-        if (this_indent > container_indent) {
-          print
-          if ((getline next_line) > 0) {
-            if (next_line ~ /^[[:space:]]+- /) {
-              items_indent = get_indent(next_line)
-            } else {
-              items_indent = this_indent
-            }
-            for (i = 1; i <= cleaned_n; i++) {
-              printf "%*s- %s\n", items_indent, "", cleaned[i]
-            }
-            print next_line
-          }
-          state = "done"
-          next
-        }
-      }
-      print
-    }
+    { lines[NR] = $0 }
     END {
-      if (state == "in-target") {
-        printf "WARNING: nirmata-kube-controller container has no args: section; skipped injecting [%s]\n", EXTRA_ARGS_STR > "/dev/stderr"
+      total = NR
+      # Locate `containers:` keyword
+      containers_kw = 0
+      for (i = 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]+containers:[[:space:]]*$/) {
+          containers_kw = i; containers_indent = get_indent(lines[i]); break
+        }
+      }
+      if (!containers_kw) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: no `containers:` keyword in %s; args injection skipped\n", FILENAME > "/dev/stderr"
+        exit
+      }
+      # Find item_indent
+      item_indent = -1
+      for (i = containers_kw + 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]*$/) continue
+        li = get_indent(lines[i])
+        if (li < containers_indent) break
+        if (li == containers_indent && lines[i] !~ /^[[:space:]]*- /) break
+        if (lines[i] ~ /^[[:space:]]*- /) { item_indent = li; break }
+      }
+      if (item_indent < 0) { for (i = 1; i <= total; i++) print lines[i]; exit }
+      # Identify container block ranges
+      n_blocks = 0
+      for (i = containers_kw + 1; i <= total; i++) {
+        if (lines[i] ~ /^[[:space:]]*$/) continue
+        li = get_indent(lines[i]); is_dash = (lines[i] ~ /^[[:space:]]*- /)
+        if (li > item_indent) continue
+        if (li == item_indent && is_dash) {
+          if (n_blocks > 0) block_end[n_blocks] = i - 1
+          n_blocks++; block_start[n_blocks] = i; continue
+        }
+        if (n_blocks > 0) block_end[n_blocks] = i - 1
+        break
+      }
+      if (n_blocks > 0 && !(n_blocks in block_end)) block_end[n_blocks] = total
+      # Find target block by `name: TARGET`
+      target_block = 0
+      for (b = 1; b <= n_blocks; b++) {
+        for (i = block_start[b]; i <= block_end[b]; i++) {
+          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$")) {
+            target_block = b; break
+          }
+        }
+        if (target_block) break
+      }
+      if (!target_block) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: container %s not found in containers: array of %s\n", TARGET, FILENAME > "/dev/stderr"
+        exit
+      }
+      # Find args: line within target block (handle `args:` and `- args:` shapes)
+      args_line = 0
+      for (i = block_start[target_block]; i <= block_end[target_block]; i++) {
+        if (lines[i] ~ /^[[:space:]]+args:[[:space:]]*$/ || lines[i] ~ /^[[:space:]]+- args:[[:space:]]*$/) {
+          args_line = i; break
+        }
+      }
+      if (!args_line) {
+        for (i = 1; i <= total; i++) print lines[i]
+        printf "WARNING: container %s has no args: section in %s; skipped injecting [%s]\n", TARGET, FILENAME, EXTRA_ARGS_STR > "/dev/stderr"
+        exit
+      }
+      # Determine items_indent by peeking next list-item line
+      items_indent = get_indent(lines[args_line])
+      if (lines[args_line] ~ /^[[:space:]]+- args:/) items_indent += 2
+      for (j = args_line + 1; j <= total; j++) {
+        if (lines[j] ~ /^[[:space:]]*$/) continue
+        if (lines[j] ~ /^[[:space:]]+- /) items_indent = get_indent(lines[j])
+        break
+      }
+      # Emit, injecting new items right after args:
+      for (i = 1; i <= total; i++) {
+        print lines[i]
+        if (i == args_line) {
+          for (e = 1; e <= cleaned_n; e++) {
+            printf "%*s- %s\n", items_indent, "", cleaned[e]
+          }
+        }
       }
     }
   ' "$file" > "$tmp" && mv "$tmp" "$file"
@@ -433,7 +532,7 @@ if [[ -n "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS" ]]; then
   for f in "$WORK_DIR/04-deploy"/*.yaml; do
     dep_name="$(extract_metadata_name "$f")"
     if [[ "$dep_name" == "nirmata-kube-controller" ]]; then
-      inject_container_args "$f" "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS"
+      inject_container_args "$f" "nirmata-kube-controller" "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS"
       injected_any=1
     fi
   done
