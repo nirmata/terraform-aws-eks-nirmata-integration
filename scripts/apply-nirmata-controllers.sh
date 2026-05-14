@@ -287,8 +287,51 @@ extract_metadata_name() {
   ' "$1"
 }
 
+# Rewrite the image: line of the container whose name == target inside a
+# single Deployment YAML. Uses an indent-aware state machine so init
+# containers, sidecars, and nested name: keys (e.g. in env or ports) are
+# left untouched. This mirrors the scoping done in 4c for args injection.
+override_container_image() {
+  local file="$1"
+  local target_container="$2"
+  local new_image="$3"
+  local tmp="$file.tmp"
+
+  awk -v TARGET="$target_container" -v NEW_IMAGE="$new_image" '
+    function get_indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
+    BEGIN { state = "outside" }
+    {
+      if ($0 ~ /^[[:space:]]*- name:[[:space:]]+/) {
+        this_indent = get_indent($0)
+        if ($0 ~ "^[[:space:]]*- name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$") {
+          if (state != "in-target" || this_indent <= container_indent) {
+            state = "in-target"; container_indent = this_indent
+            print; next
+          }
+        } else if (state == "in-target" && this_indent <= container_indent) {
+          state = "outside"
+        }
+      }
+      if (state == "in-target" && $0 ~ /^[[:space:]]+image:[[:space:]]+/) {
+        this_indent = get_indent($0)
+        if (this_indent > container_indent) {
+          printf "%*simage: %s\n", this_indent, "", NEW_IMAGE
+          state = "done"
+          next
+        }
+      }
+      print
+    }
+    END {
+      if (state == "outside" || state == "in-target") {
+        printf "WARNING: container %s not fully matched in %s (state=%s); image override may not have applied\n", TARGET, FILENAME, state > "/dev/stderr"
+      }
+    }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 if (( ${#IMAGE_OVERRIDES[@]} > 0 )); then
-  log "Applying per-deployment image overrides..."
+  log "Applying per-deployment image overrides (scoped to matching container)..."
   declare -A SEEN=()
   shopt -s nullglob
   for f in "$WORK_DIR/04-deploy"/*.yaml; do
@@ -300,9 +343,8 @@ if (( ${#IMAGE_OVERRIDES[@]} > 0 )); then
     SEEN[$dep_name]=1
     if [[ -n "${IMAGE_OVERRIDES[$dep_name]:-}" ]]; then
       new_img="${IMAGE_OVERRIDES[$dep_name]}"
-      log "  $dep_name → $new_img"
-      sed -E -i.bak "s|^([[:space:]]*image:[[:space:]]*).+\$|\1${new_img}|" "$f"
-      rm -f "$f.bak"
+      log "  $dep_name → $new_img (targeting container '$dep_name')"
+      override_container_image "$f" "$dep_name" "$new_img"
     else
       log "  $dep_name (no override; leaving image unchanged)"
     fi
