@@ -121,12 +121,19 @@ if [[ -n "$DOCKER_USERNAME" || -n "$DOCKER_PASSWORD" || -n "$DOCKER_SERVER" ]]; 
 fi
 
 # ─── Dependency check ──────────────────────────────────────────────────────
-for cmd in aws kubectl curl jq; do
+for cmd in aws kubectl curl jq yq; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "ERROR: required command '$cmd' not found in PATH" >&2
     exit 1
   fi
 done
+
+# Ensure we have the Go-based yq (mikefarah/yq), not the unrelated Python yq
+if ! yq --version 2>&1 | grep -q 'mikefarah'; then
+  echo "ERROR: 'yq' must be the Go-based mikefarah/yq (v4+). Install via: brew install yq" >&2
+  yq --version >&2 || true
+  exit 1
+fi
 
 # ─── Working dir (auto-cleaned) ────────────────────────────────────────────
 WORK_DIR="$(mktemp -d -t nirmata-XXXXXX)"
@@ -189,49 +196,31 @@ log "Got $(wc -l < "$MANIFEST_FILE" | tr -d ' ') lines of manifest data."
 
 # ─── 3a. Drop Nirmata's default registry Secret from the manifest ──────────
 # Nirmata's bundle ships a kind:Secret named 'nirmata-controller-registry-secret'.
-# We create our own image-pull secret (default name: artifactory-secret), so
-# skip Nirmata's so we don't fight over the same object. References to the
-# old name in SAs / Deployments are rewritten in step 3b below.
+# We create our own image-pull secret (default: artifactory-secret) so
+# Nirmata's copy is redundant and would conflict. References to the old name
+# in SAs / Deployments are rewritten in step 3b.
 NIRMATA_DEFAULT_PULL_SECRET_NAME="nirmata-controller-registry-secret"
-FILTERED_FILE="$WORK_DIR/controllers-filtered.yaml"
 
-awk -v target_name="$NIRMATA_DEFAULT_PULL_SECRET_NAME" '
-  BEGIN { buf = ""; first = 1; skipped = 0 }
-  /^---[[:space:]]*$/ { flush(); buf = ""; next }
-  { buf = buf $0 "\n" }
-  END { flush(); printf "%d\n", skipped > "/dev/stderr" }
-
-  function flush(   is_target_secret) {
-    if (buf ~ /^[[:space:]]*$/) { return }
-    is_target_secret = 0
-    if (buf ~ /(^|\n)kind:[[:space:]]+"?Secret"?[[:space:]]*(\n|$)/) {
-      # Only matches metadata.name at indent >=1 (Secrets have no nested name: keys)
-      if (buf ~ ("(^|\n)[[:space:]]+name:[[:space:]]+\"?" target_name "\"?[[:space:]]*(\n|$)")) {
-        is_target_secret = 1
-      }
-    }
-    if (is_target_secret) { skipped++; return }
-    if (!first) { printf "---\n" }
-    first = 0
-    printf "%s", buf
-  }
-' "$MANIFEST_FILE" > "$FILTERED_FILE" 2> "$WORK_DIR/skip-count.txt"
-
-SKIPPED_SECRETS="$(cat "$WORK_DIR/skip-count.txt" 2>/dev/null || echo 0)"
+SKIPPED_SECRETS="$(OLD_NAME="$NIRMATA_DEFAULT_PULL_SECRET_NAME" \
+  yq 'select(.kind == "Secret" and .metadata.name == strenv(OLD_NAME)) | .metadata.name' \
+  "$MANIFEST_FILE" | grep -c . || true)"
 if [[ "$SKIPPED_SECRETS" -gt 0 ]]; then
-  log "Skipped ${SKIPPED_SECRETS} occurrence(s) of Secret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' from the downloaded manifest."
+  log "Dropping ${SKIPPED_SECRETS} occurrence(s) of Secret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' from the manifest..."
+  OLD_NAME="$NIRMATA_DEFAULT_PULL_SECRET_NAME" \
+    yq -i 'select(.kind != "Secret" or .metadata.name != strenv(OLD_NAME))' "$MANIFEST_FILE"
 fi
-mv "$FILTERED_FILE" "$MANIFEST_FILE"
 
 # ─── 3b. Rewrite remaining references to the Nirmata-default secret name ──
 # After 3a the kind:Secret object is gone, but SAs and Deployments still
-# reference 'nirmata-controller-registry-secret' in their imagePullSecrets.
-# Rewrite those references so they point to the secret we create below
-# (default: artifactory-secret, configurable via IMAGE_PULL_SECRET_NAME).
+# reference 'nirmata-controller-registry-secret' in their imagePullSecrets[].
+# Rewrite those name references to ${IMAGE_PULL_SECRET_NAME} (default:
+# artifactory-secret) so the deployments and SAs ask for the secret we
+# actually create below.
 if [[ "$IMAGE_PULL_SECRET_NAME" != "$NIRMATA_DEFAULT_PULL_SECRET_NAME" ]]; then
-  log "Rewriting imagePullSecret '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' → '${IMAGE_PULL_SECRET_NAME}' in remaining manifests..."
-  sed -i.bak "s|${NIRMATA_DEFAULT_PULL_SECRET_NAME}|${IMAGE_PULL_SECRET_NAME}|g" "$MANIFEST_FILE"
-  rm -f "${MANIFEST_FILE}.bak"
+  log "Rewriting imagePullSecret references '${NIRMATA_DEFAULT_PULL_SECRET_NAME}' → '${IMAGE_PULL_SECRET_NAME}'..."
+  OLD="$NIRMATA_DEFAULT_PULL_SECRET_NAME" NEW="$IMAGE_PULL_SECRET_NAME" \
+    yq -i '(.. | select(has("imagePullSecrets") and (.imagePullSecrets | tag == "!!seq")) | .imagePullSecrets[] | select(.name == strenv(OLD))).name = strenv(NEW)' \
+    "$MANIFEST_FILE"
 fi
 
 # ─── 4. Split into individual documents and classify by kind ───────────────
@@ -287,103 +276,18 @@ extract_metadata_name() {
   ' "$1"
 }
 
-# Rewrite the image: line of the container whose name == target inside a
-# single Deployment YAML. Uses a two-pass awk that handles both common YAML
-# styles: (a) standard, where the container leads with `- name: <name>`, and
-# (b) compact, where list items share indent with the parent key and the
-# container's first field may be `args:` or `image:` rather than `name:`.
-# Quoted names (`name: "X"`) are supported. Init containers, sidecars, and
-# nested name: keys in env/port blocks are left untouched.
+# Replace the .image of the container whose .name matches $target_container,
+# scoped to the single-document Deployment in $file. Other containers
+# (init, sidecars) and nested name: keys are left untouched by virtue of
+# the path expression selecting only the matching container under
+# .spec.template.spec.containers[].
 override_container_image() {
   local file="$1"
   local target_container="$2"
   local new_image="$3"
-  local tmp="$file.tmp"
-
-  awk -v TARGET="$target_container" -v NEW_IMAGE="$new_image" '
-    function get_indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
-    { lines[NR] = $0 }
-    END {
-      total = NR
-      # Locate `containers:` keyword
-      containers_kw = 0
-      for (i = 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]+containers:[[:space:]]*$/) {
-          containers_kw = i; containers_indent = get_indent(lines[i]); break
-        }
-      }
-      if (!containers_kw) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: no `containers:` keyword in %s; image override skipped\n", FILENAME > "/dev/stderr"
-        exit
-      }
-      # Find item_indent (handles both compact and indented list styles)
-      item_indent = -1
-      for (i = containers_kw + 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]*$/) continue
-        li = get_indent(lines[i])
-        if (li < containers_indent) break
-        if (li == containers_indent && lines[i] !~ /^[[:space:]]*- /) break
-        if (lines[i] ~ /^[[:space:]]*- /) { item_indent = li; break }
-      }
-      if (item_indent < 0) { for (i = 1; i <= total; i++) print lines[i]; exit }
-      # Identify container block ranges
-      n_blocks = 0
-      for (i = containers_kw + 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]*$/) continue
-        li = get_indent(lines[i]); is_dash = (lines[i] ~ /^[[:space:]]*- /)
-        if (li > item_indent) continue
-        if (li == item_indent && is_dash) {
-          if (n_blocks > 0) block_end[n_blocks] = i - 1
-          n_blocks++; block_start[n_blocks] = i; continue
-        }
-        if (n_blocks > 0) block_end[n_blocks] = i - 1
-        break
-      }
-      if (n_blocks > 0 && !(n_blocks in block_end)) block_end[n_blocks] = total
-      # Find block by `name: TARGET` (with optional dash, optional quotes)
-      target_block = 0
-      for (b = 1; b <= n_blocks; b++) {
-        for (i = block_start[b]; i <= block_end[b]; i++) {
-          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+[\"'\'']?" TARGET "[\"'\'']?[[:space:]]*$")) {
-            target_block = b; break
-          }
-        }
-        if (target_block) break
-      }
-      if (!target_block) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: container %s not found in containers: array of %s\n", TARGET, FILENAME > "/dev/stderr"
-        exit
-      }
-      # Find image: line within target block (handle `image:` and `- image:`)
-      image_line = 0
-      for (i = block_start[target_block]; i <= block_end[target_block]; i++) {
-        if (lines[i] ~ /^[[:space:]]+image:[[:space:]]+/ || lines[i] ~ /^[[:space:]]+- image:[[:space:]]+/) {
-          image_line = i; break
-        }
-      }
-      if (!image_line) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: container %s has no image: line in %s\n", TARGET, FILENAME > "/dev/stderr"
-        exit
-      }
-      # Emit, replacing image: line and preserving the original prefix style
-      for (i = 1; i <= total; i++) {
-        if (i == image_line) {
-          if (lines[i] ~ /^[[:space:]]+- image:/) {
-            match(lines[i], /^[[:space:]]+/)
-            printf "%s- image: %s\n", substr(lines[i], 1, RLENGTH), NEW_IMAGE
-          } else {
-            match(lines[i], /^[[:space:]]+/)
-            printf "%simage: %s\n", substr(lines[i], 1, RLENGTH), NEW_IMAGE
-          }
-        } else {
-          print lines[i]
-        }
-      }
-    }
-  ' "$file" > "$tmp" && mv "$tmp" "$file"
+  TARGET="$target_container" NEW_IMAGE="$new_image" \
+    yq -i '(.spec.template.spec.containers[] | select(.name == strenv(TARGET)) | .image) = strenv(NEW_IMAGE)' \
+    "$file"
 }
 
 if (( ${#IMAGE_OVERRIDES[@]} > 0 )); then
@@ -419,110 +323,18 @@ fi
 # Useful for flags like '-insecure' that the controller needs to talk to a
 # private endpoint with a self-signed or non-public-CA TLS certificate.
 #
-# Uses the same two-pass block-finding approach as override_container_image
-# so it handles compact YAML (containers and items at the same indent),
-# containers that lead with a field other than `name:`, quoted names, and
-# `args:` in both `args:` and `- args:` shapes.
+# Prepends each whitespace-separated token in $extra_args to the .args list
+# of the container whose .name matches $target_container. The yq path
+# expression scopes the modification to that one container, leaving init
+# containers and sidecars untouched.
 inject_container_args() {
   local file="$1"
   local target_container="$2"
   local extra_args="$3"
-  local tmp="$file.tmp"
-
-  awk -v TARGET="$target_container" -v EXTRA_ARGS_STR="$extra_args" '
-    function get_indent(s) { match(s, /^[[:space:]]*/); return RLENGTH }
-    BEGIN {
-      n_extra = split(EXTRA_ARGS_STR, extra, /[[:space:]]+/)
-      cleaned_n = 0
-      for (i = 1; i <= n_extra; i++) {
-        if (extra[i] != "") { cleaned_n++; cleaned[cleaned_n] = extra[i] }
-      }
-    }
-    { lines[NR] = $0 }
-    END {
-      total = NR
-      # Locate `containers:` keyword
-      containers_kw = 0
-      for (i = 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]+containers:[[:space:]]*$/) {
-          containers_kw = i; containers_indent = get_indent(lines[i]); break
-        }
-      }
-      if (!containers_kw) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: no `containers:` keyword in %s; args injection skipped\n", FILENAME > "/dev/stderr"
-        exit
-      }
-      # Find item_indent
-      item_indent = -1
-      for (i = containers_kw + 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]*$/) continue
-        li = get_indent(lines[i])
-        if (li < containers_indent) break
-        if (li == containers_indent && lines[i] !~ /^[[:space:]]*- /) break
-        if (lines[i] ~ /^[[:space:]]*- /) { item_indent = li; break }
-      }
-      if (item_indent < 0) { for (i = 1; i <= total; i++) print lines[i]; exit }
-      # Identify container block ranges
-      n_blocks = 0
-      for (i = containers_kw + 1; i <= total; i++) {
-        if (lines[i] ~ /^[[:space:]]*$/) continue
-        li = get_indent(lines[i]); is_dash = (lines[i] ~ /^[[:space:]]*- /)
-        if (li > item_indent) continue
-        if (li == item_indent && is_dash) {
-          if (n_blocks > 0) block_end[n_blocks] = i - 1
-          n_blocks++; block_start[n_blocks] = i; continue
-        }
-        if (n_blocks > 0) block_end[n_blocks] = i - 1
-        break
-      }
-      if (n_blocks > 0 && !(n_blocks in block_end)) block_end[n_blocks] = total
-      # Find target block by `name: TARGET`
-      target_block = 0
-      for (b = 1; b <= n_blocks; b++) {
-        for (i = block_start[b]; i <= block_end[b]; i++) {
-          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+[\"'\'']?" TARGET "[\"'\'']?[[:space:]]*$")) {
-            target_block = b; break
-          }
-        }
-        if (target_block) break
-      }
-      if (!target_block) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: container %s not found in containers: array of %s\n", TARGET, FILENAME > "/dev/stderr"
-        exit
-      }
-      # Find args: line within target block (handle `args:` and `- args:` shapes)
-      args_line = 0
-      for (i = block_start[target_block]; i <= block_end[target_block]; i++) {
-        if (lines[i] ~ /^[[:space:]]+args:[[:space:]]*$/ || lines[i] ~ /^[[:space:]]+- args:[[:space:]]*$/) {
-          args_line = i; break
-        }
-      }
-      if (!args_line) {
-        for (i = 1; i <= total; i++) print lines[i]
-        printf "WARNING: container %s has no args: section in %s; skipped injecting [%s]\n", TARGET, FILENAME, EXTRA_ARGS_STR > "/dev/stderr"
-        exit
-      }
-      # Determine items_indent by peeking next list-item line
-      items_indent = get_indent(lines[args_line])
-      if (lines[args_line] ~ /^[[:space:]]+- args:/) items_indent += 2
-      for (j = args_line + 1; j <= total; j++) {
-        if (lines[j] ~ /^[[:space:]]*$/) continue
-        if (lines[j] ~ /^[[:space:]]+- /) items_indent = get_indent(lines[j])
-        break
-      }
-      # Emit, injecting new items right after args:
-      for (i = 1; i <= total; i++) {
-        print lines[i]
-        if (i == args_line) {
-          for (e = 1; e <= cleaned_n; e++) {
-            printf "%*s- %s\n", items_indent, "", cleaned[e]
-          }
-        }
-      }
-    }
-  ' "$file" > "$tmp" && mv "$tmp" "$file"
+  [[ -z "$extra_args" ]] && return 0
+  TARGET="$target_container" EXTRA="$extra_args" \
+    yq -i '(.spec.template.spec.containers[] | select(.name == strenv(TARGET)) | .args) |= ((strenv(EXTRA) | split(" ") | map(select(. != ""))) + .)' \
+    "$file"
 }
 
 if [[ -n "$NIRMATA_KUBE_CONTROLLER_EXTRA_ARGS" ]]; then

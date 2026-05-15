@@ -27,12 +27,13 @@ infra + Nirmata registration only; this script does everything that needs
 
 ## Prerequisites
 
-| Tool       | Purpose                                  |
-|------------|------------------------------------------|
-| `aws` CLI  | EKS kubeconfig + IAM auth                |
-| `kubectl`  | Apply manifests to the cluster           |
-| `curl`     | Call the Nirmata REST API                |
-| `jq`       | Parse JSON responses                     |
+| Tool       | Purpose                                                |
+|------------|--------------------------------------------------------|
+| `aws` CLI  | EKS kubeconfig + IAM auth                              |
+| `kubectl`  | Apply manifests to the cluster                         |
+| `curl`     | Call the Nirmata REST API                              |
+| `jq`       | Parse JSON responses                                   |
+| `yq`       | YAML manipulation — **must be [mikefarah/yq](https://github.com/mikefarah/yq) v4+** (the Go binary, not the unrelated Python `yq`). Install via `brew install yq` / direct binary download. The script verifies this at startup. |
 
 Network requirements:
 
