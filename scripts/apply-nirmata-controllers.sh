@@ -345,7 +345,7 @@ override_container_image() {
       target_block = 0
       for (b = 1; b <= n_blocks; b++) {
         for (i = block_start[b]; i <= block_end[b]; i++) {
-          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$")) {
+          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+[\"'\'']?" TARGET "[\"'\'']?[[:space:]]*$")) {
             target_block = b; break
           }
         }
@@ -481,7 +481,7 @@ inject_container_args() {
       target_block = 0
       for (b = 1; b <= n_blocks; b++) {
         for (i = block_start[b]; i <= block_end[b]; i++) {
-          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+\"?" TARGET "\"?[[:space:]]*$")) {
+          if (lines[i] ~ ("^[[:space:]]+(- +)?name:[[:space:]]+[\"'\'']?" TARGET "[\"'\'']?[[:space:]]*$")) {
             target_block = b; break
           }
         }
